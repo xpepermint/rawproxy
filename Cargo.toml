@@ -10,8 +10,8 @@ homepage = "https://github.com/xpepermint/rawproxy"
 repository = "https://github.com/xpepermint/rawproxy"
 
 [dependencies]
-async-std = { version = "1.5.0" }
-async-uninet = { version = "0.1.1" }
+async-std = { version = "^1.5.0" }
+async-uninet = { version = "^0.1.1" }
 
 [dev-dependencies]
-async-std = { version = "1.5.0", features = ["attributes"] }
+async-std = { version = "^1.5.0", features = ["attributes"] }

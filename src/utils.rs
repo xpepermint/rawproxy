@@ -45,15 +45,16 @@ pub fn string_to_usize(txt: &str) -> Option<usize> {
 
 /// Returns true if the provided bytes array holds a specific sequance of bytes.
 pub fn vec_has_sequence(bytes: &[u8], needle: &[u8]) -> bool {
-    let mut foun = 0;
+    let mut found = 0;
     let nsize = needle.len();
     for byte in bytes.into_iter() {
-        if foun == nsize {
-            return true;
-        } else if *byte == needle[foun] {
-            foun += 1;
+        if *byte == needle[found] {
+            found += 1;
         } else {
-            foun = 0;
+            found = 0;
+        }
+        if found == nsize {
+            return true;
         }
     }
     false
@@ -242,6 +243,7 @@ mod tests {
 
     #[async_std::test]
     async fn checks_vector_has_sequence() {
+        assert!(vec_has_sequence(&[0x0D, 0x0A, 0x0D, 0x0A], &[0x0D, 0x0A, 0x0D, 0x0A]));
         assert!(vec_has_sequence(&[1, 4, 6, 10, 21, 5, 150], &[10, 21, 5]));
         assert!(!vec_has_sequence(&[1, 4, 6, 10, 21, 5, 150], &[10, 5]));
     }
