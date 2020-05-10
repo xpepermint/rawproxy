@@ -22,7 +22,7 @@ while let Some(stream) = listener.incoming().next().await {
         router.parse_response().await.unwrap();
         router.write_response_header("Status", "fast"); // override header
         router.relay_response().await.unwrap();
-    }
+    })
 }
 ```
 
