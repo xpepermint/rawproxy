@@ -35,6 +35,12 @@ pub fn write_header(lines: &mut Vec<String>, name: &str, value: &str) {
     }
 }
 
+/// Removes the provided protocol headers.
+pub fn remove_header(lines: &mut Vec<String>, name: &str) {
+    let needle = format!("{}: ", name);
+    lines.retain(|line| !line.starts_with(&needle));
+}
+
 /// Parses string into number.
 pub fn string_to_usize(txt: &str) -> Option<usize> {
     match txt.parse::<usize>() {
@@ -258,6 +264,21 @@ mod tests {
             "GET / HTTP/1.1".to_string(),
             "Host: bar".to_string(),
             "".to_string(),
+        ]);
+    }
+
+    #[async_std::test]
+    async fn removes_header_value() {
+        let mut lines = vec![
+            "GET / HTTP/1.1".to_string(),
+            "Host: google.com".to_string(),
+            "Host: microsoft.com".to_string(),
+            "Connection: close".to_string(),
+        ];
+        remove_header(&mut lines, "Host");
+        assert_eq!(lines,  vec![
+            "GET / HTTP/1.1".to_string(),
+            "Connection: close".to_string(),
         ]);
     }
 

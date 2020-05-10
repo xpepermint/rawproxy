@@ -17,7 +17,7 @@ while let Some(stream) = listener.incoming().next().await {
         let mut router = Router::new(stream);
         let mut router = Router::new(stream);
         router.parse_request().await.unwrap();
-        router.write_request_header("Host", "jsonplaceholder.typicode.com:80"); // override header
+        router.set_request_header("Host", "jsonplaceholder.typicode.com:80"); // override header
         router.relay_request().await.unwrap();
         router.parse_response().await.unwrap();
         router.write_response_header("Status", "fast"); // override header

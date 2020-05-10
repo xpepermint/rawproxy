@@ -23,7 +23,7 @@ async fn starts_inet_server() {
 
         let mut router = Router::new(stream);
         router.parse_request().await.unwrap();
-        router.write_request_header("Host", "jsonplaceholder.typicode.com:80"); // override
+        router.set_request_header("Host", "jsonplaceholder.typicode.com:80"); // override
         router.relay_request().await.unwrap();
         router.parse_response().await.unwrap();
         router.relay_response().await.unwrap();
