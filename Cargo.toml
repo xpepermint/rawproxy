@@ -1,0 +1,17 @@
+[package]
+name = "rawproxy"
+description = "Proxy handler for asynchronous streams."
+license = "MIT"
+version = "0.1.0"
+authors = ["Kristijan Sedlak <xpepermint@gmail.com>"]
+edition = "2018"
+documentation = "https://github.com/xpepermint/rawproxy"
+homepage = "https://github.com/xpepermint/rawproxy"
+repository = "https://github.com/xpepermint/rawproxy"
+
+[dependencies]
+async-std = { version = "1.5.0" }
+async-uninet = { version = "0.1.1" }
+
+[dev-dependencies]
+async-std = { version = "1.5.0", features = ["attributes"] }
