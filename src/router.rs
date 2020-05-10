@@ -1,20 +1,24 @@
 use async_std::io;
 use async_std::prelude::*;
-use async_std::sync::{Arc};
-use crate::{Stream, RouterOptions, SocketAddr, Error, ErrorKind};
+use crate::{Stream, SocketAddr, Error};
 use crate::utils::{read_protocol, read_header, write_header, forward_body};
 
+#[derive(Debug)]
 pub struct Router {
     stream: Stream,
-    options: Arc<RouterOptions>,
+    relay: Option<Stream>,
+    request_headers: Vec<String>,
+    response_headers: Vec<String>,
 }
 
 impl Router {
-    
-    pub fn from_stream(stream: Stream) -> Self {
+
+    pub fn new(stream: Stream) -> Self {
         Self {
             stream,
-            options: Arc::new(RouterOptions::default()),
+            relay: None,
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
         }
     }
 
@@ -22,81 +26,91 @@ impl Router {
         &self.stream
     }
 
-    pub fn options(&self) -> &RouterOptions {
-        &self.options
+    pub fn request_headers(&self) -> &Vec<String> {
+        &self.request_headers
     }
 
-    pub fn set_stream(&mut self, stream: Stream) {
-        self.stream = stream;
+    pub fn response_headers(&self) -> &Vec<String> {
+        &self.request_headers
     }
 
-    pub fn set_options(&mut self, options: Arc<RouterOptions>) {
-        self.options = options;
+    pub fn read_request_header<N: Into<String>>(&self, name: N) -> Option<String> {
+        read_header(&self.request_headers, &name.into())
     }
 
-    pub async fn resolve(&mut self) -> io::Result<()> {
-    
-        // read request headers
-        let mut lines: Vec<String> = Vec::new();
-        match read_protocol(&mut self.stream, &mut lines, *self.options.request_headers_size_limit()).await {
-            Ok(_) => (),
-            Err(kind) => return self.abort(Error::Request(kind)).await,
+    pub fn read_response_header<N: Into<String>>(&self, name: N) -> Option<String> {
+        read_header(&self.response_headers, &name.into())
+    }
+
+    pub fn write_request_header<N: Into<String>, V: Into<String>>(&mut self, name: N, value: V) {
+        write_header(&mut self.request_headers, &name.into(), &value.into());
+    }
+
+    pub fn write_response_header<N: Into<String>, V: Into<String>>(&mut self, name: N, value: V) {
+        write_header(&mut self.response_headers, &name.into(), &value.into());
+    }
+
+    pub async fn parse_request(&mut self) -> Result<(), Error> {
+        match read_protocol(&mut self.stream, &mut self.request_headers, None).await {
+            Ok(_) => Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+
+    pub async fn parse_response(&mut self) -> Result<(), Error> {
+        let mut source = match &mut self.relay {
+            Some(source) => source,
+            None => return Err(Error::StreamNotReadable),
         };
+        match read_protocol(&mut source, &mut self.response_headers, None).await {
+            Ok(_) => Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
 
-        // set target Host header
-        let host = match read_header(&lines, "Host") {
-            Some(host) => match self.options.target(&host) {
-                Some(host) => host.to_string(),
-                None => host,
-            },
-            None => return self.abort(Error::Request(ErrorKind::MissingHeader(String::from("Host")))).await,
+    pub async fn relay_request(&mut self) -> Result<(), Error> {
+        let host = match read_header(&self.request_headers, "Host") {
+            Some(host) => host,
+            None => return Err(Error::MissingHeader(String::from("Host"))),
         };
-        write_header(&mut lines, "Host", &host);
-
-        // prepare target address
         let address = match SocketAddr::from_str(host).await {
             Ok(address) => address,
-            Err(_) => return self.abort(Error::Relay(ErrorKind::InvalidHeader(String::from("Host")))).await,
+            Err(_) => return Err(Error::InvalidHeader(String::from("Host"))),
         };
-    
-        // read response
-        // forward request to target
-        let mut source = match Stream::connect(&address).await {
-            Ok(source) => source,
-            Err(_) => return self.abort(Error::Relay(ErrorKind::WriteFailed)).await,
+        self.relay = match Stream::connect(&address).await {
+            Ok(source) => Some(source),
+            Err(_) => return Err(Error::StreamNotWritable),
         };
-        match source.write(lines.join("\r\n").as_bytes()).await {
+        let mut target = &mut self.relay.as_ref().unwrap();
+        match target.write(self.request_headers.join("\r\n").as_bytes()).await {
             Ok(_) => (),
-            Err(_) => return self.abort(Error::Relay(ErrorKind::WriteFailed)).await,
+            Err(_) => return Err(Error::StreamNotWritable),
         };
-        match forward_body(&mut self.stream, &mut source, &lines, *self.options.request_body_size_limit()).await {
-            Ok(_) => (),
-            Err(kind) => return self.abort(Error::Relay(kind)).await,
-        };
-
-        // parse response protocol headers
-        let mut lines: Vec<String> = Vec::new();
-        match read_protocol(&mut source, &mut lines, *self.options.response_headers_size_limit()).await {
-            Ok(_) => (),
-            Err(kind) => return self.abort(Error::Response(kind)).await,
-        };
-
-        // forward response to client
-        match self.stream.write(lines.join("\r\n").as_bytes()).await {
-            Ok(_) => (),
-            Err(_) => return self.abort(Error::Response(ErrorKind::WriteFailed)).await,
-        };
-        match forward_body(&mut source, &mut self.stream, &lines, *self.options.response_body_size_limit()).await {
-            Ok(_) => (),
-            Err(kind) => return self.abort(Error::Response(kind)).await,
-        };
-
-        Ok(())
+        match forward_body(&mut self.stream, &mut target, &self.request_headers, None).await {
+            Ok(_) => Ok(()),
+            Err(error) => return Err(error),
+        }
     }
 
-    async fn abort(&mut self, error: Error) -> io::Result<()> {
-        println!("error: {:?}", error);
-        self.stream.write(b"ERROR!").await.unwrap();
-        Ok(())
+    pub async fn relay_response(&mut self) -> Result<(), Error> {
+        let mut source = match &mut self.relay {
+            Some(source) => source,
+            None => return Err(Error::StreamNotWritable),
+        };
+        match self.stream.write(self.response_headers.join("\r\n").as_bytes()).await {
+            Ok(_) => (),
+            Err(_) => return Err(Error::StreamNotWritable),
+        };
+        match forward_body(&mut source, &mut self.stream, &self.response_headers, None).await {
+            Ok(_) => Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<usize, Error> {
+        match self.stream.write(bytes).await {
+            Ok(size) => Ok(size),
+            Err(_) => return Err(Error::StreamNotWritable),
+        }
     }
 }

@@ -1,6 +1,6 @@
 use async_std::prelude::*;
 use async_std::io::{Read, Write};
-use crate::{ErrorKind};
+use crate::{Error};
 
 /// Extracts a specific header from the provided protocol headers.
 pub fn read_header(lines: &Vec<String>, name: &str) -> Option<String> {
@@ -29,9 +29,9 @@ pub fn write_header(lines: &mut Vec<String>, name: &str, value: &str) {
         }
     }
     if !found {
-        lines.push(
-            format!("{}: {}", name, value),
-        );
+        lines.pop();
+        lines.push(format!("{}: {}", name, value));
+        lines.push(format!(""));
     }
 }
 
@@ -62,7 +62,7 @@ pub fn vec_has_sequence(bytes: &[u8], needle: &[u8]) -> bool {
 
 /// Parses HTTP protocol headers into `lines`. What's left in the stream represents request body.
 /// Limit in number of bytes for the protocol headers can be applied.
-pub async fn read_protocol<I>(input: &mut I, lines: &mut Vec<String>, limit: Option<usize>) -> Result<(), ErrorKind>
+pub async fn read_protocol<I>(input: &mut I, lines: &mut Vec<String>, limit: Option<usize>) -> Result<(), Error>
     where
     I: Read + Unpin,
 {
@@ -74,7 +74,7 @@ pub async fn read_protocol<I>(input: &mut I, lines: &mut Vec<String>, limit: Opt
         let mut byte = [0u8];
         let size = match input.read(&mut byte).await {
             Ok(size) => size,
-            Err(_) => return Err(ErrorKind::ReadFailed),
+            Err(_) => return Err(Error::StreamNotReadable),
         };
         let byte = byte[0];
         count += 1;
@@ -82,24 +82,24 @@ pub async fn read_protocol<I>(input: &mut I, lines: &mut Vec<String>, limit: Opt
         if size == 0 {
             break;
         } else if limit.is_some() && Some(count) > limit {
-            return Err(ErrorKind::SizeLimitExceeded(limit.unwrap()));
+            return Err(Error::SizeLimitExceeded(limit.unwrap()));
         } else if byte == 0x0D { // char \r
             if stage == 0 || stage == 2 {
                 stage += 1;
             } else {
-                return Err(ErrorKind::InvalidData);
+                return Err(Error::InvalidData);
             }
         } else if byte == 0x0A { // char \n
             if stage == 1 || stage == 3 {
                 let line = match String::from_utf8(buffer.to_vec()) {
                     Ok(line) => line,
-                    Err(_) => return Err(ErrorKind::InvalidData),
+                    Err(_) => return Err(Error::InvalidData),
                 };
                 lines.push(line);
                 buffer.clear();
                 stage += 1;
             } else {
-                return Err(ErrorKind::InvalidData);
+                return Err(Error::InvalidData);
             }
         } else { // arbitrary char
             buffer.push(byte);
@@ -116,7 +116,7 @@ pub async fn read_protocol<I>(input: &mut I, lines: &mut Vec<String>, limit: Opt
 }
 
 /// Streams body data from input to output.
-pub async fn forward_body<I, O>(mut input: &mut I, mut output: &mut O, lines: &Vec<String>, limit: Option<usize>) -> Result<(), ErrorKind>
+pub async fn forward_body<I, O>(mut input: &mut I, mut output: &mut O, lines: &Vec<String>, limit: Option<usize>) -> Result<(), Error>
     where
     I: Write + Read + Unpin,
     O: Write + Read + Unpin,
@@ -132,14 +132,14 @@ pub async fn forward_body<I, O>(mut input: &mut I, mut output: &mut O, lines: &V
         let length = match read_header(&lines, "Content-Length") {
             Some(encoding) => match string_to_usize(&encoding) {
                 Some(encoding) => encoding,
-                None => return Err(ErrorKind::InvalidHeader(String::from("Content-Length"))),
+                None => return Err(Error::InvalidHeader(String::from("Content-Length"))),
             },
             None => 0,
         };
         if length == 0 {
             return Ok(());
         } else if limit.is_some() && length > limit.unwrap() {
-            return Err(ErrorKind::SizeLimitExceeded(limit.unwrap()));
+            return Err(Error::SizeLimitExceeded(limit.unwrap()));
         }
         forward_sized_body(&mut input, &mut output, length).await
     }
@@ -150,8 +150,8 @@ pub async fn forward_body<I, O>(mut input: &mut I, mut output: &mut O, lines: &V
 /// 
 /// The method searches for `0\r\n\r\n` which indicates the end of an input
 /// stream. If the limit is set and the body exceeds the allowed size then the
-/// forwarding will be stopped with and error.
-pub async fn forward_chunked_body<I, O>(input: &mut I, output: &mut O, limit: Option<usize>) -> Result<(), ErrorKind>
+/// forwarding will be stopped with an event.
+pub async fn forward_chunked_body<I, O>(input: &mut I, output: &mut O, limit: Option<usize>) -> Result<(), Error>
     where
     I: Write + Read + Unpin,
     O: Write + Read + Unpin,
@@ -162,22 +162,22 @@ pub async fn forward_chunked_body<I, O>(input: &mut I, output: &mut O, limit: Op
         let mut bytes = [0u8; 1024];
         let size = match input.read(&mut bytes).await {
             Ok(size) => size,
-            Err(_) => return Err(ErrorKind::ReadFailed),
+            Err(_) => return Err(Error::StreamNotReadable),
         };
         let mut bytes = &mut bytes[0..size].to_vec();
         count += size;
 
         if limit.is_some() && count >= limit.unwrap() {
-            return Err(ErrorKind::SizeLimitExceeded(limit.unwrap()));
+            return Err(Error::SizeLimitExceeded(limit.unwrap()));
         }
 
         match output.write(&bytes).await {
             Ok(source) => source,
-            Err(_) => return Err(ErrorKind::WriteFailed),
+            Err(_) => return Err(Error::StreamNotWritable),
         };
         match output.flush().await {
             Ok(_) => (),
-            Err(_) => return Err(ErrorKind::WriteFailed),
+            Err(_) => return Err(Error::StreamNotWritable),
         };
 
         buffer.append(&mut bytes);
@@ -195,7 +195,7 @@ pub async fn forward_chunked_body<I, O>(input: &mut I, output: &mut O, limit: Op
 /// 
 /// The method expects that the input holds only body data. This means that we
 /// have to read input protocol headers before we call this method.
-pub async fn forward_sized_body<I, O>(input: &mut I, output: &mut O, length: usize) -> Result<(), ErrorKind>
+pub async fn forward_sized_body<I, O>(input: &mut I, output: &mut O, length: usize) -> Result<(), Error>
     where
     I: Read + Unpin + ?Sized,
     O: Write + Unpin + ?Sized,
@@ -205,24 +205,24 @@ pub async fn forward_sized_body<I, O>(input: &mut I, output: &mut O, length: usi
         let mut bytes = [0u8; 1024];
         let size = match input.read(&mut bytes).await {
             Ok(size) => size,
-            Err(_) => return Err(ErrorKind::ReadFailed),
+            Err(_) => return Err(Error::StreamNotReadable),
         };
         let bytes = &mut bytes[0..size].to_vec();
         count += size;
 
         match output.write(&bytes).await {
             Ok(size) => size,
-            Err(_) => return Err(ErrorKind::WriteFailed),
+            Err(_) => return Err(Error::StreamNotWritable),
         };
         match output.flush().await {
             Ok(_) => (),
-            Err(_) => return Err(ErrorKind::WriteFailed),
+            Err(_) => return Err(Error::StreamNotWritable),
         };
 
         if size == 0 || count == length {
             break;
         } else if count > length {
-            return Err(ErrorKind::SizeLimitExceeded(length));
+            return Err(Error::SizeLimitExceeded(length));
         }
     }
     Ok(())
@@ -233,12 +233,32 @@ mod tests {
     use super::*;
     
     #[async_std::test]
-    async fn read_header_value() {
+    async fn reads_header_value() {
         assert_eq!(read_header(&vec![
             "GET / HTTP/1.1".to_string(),
             "Host: google.com".to_string(),
             "Connection: close".to_string(),
         ], "Host"), Some("google.com".to_string()));
+    }
+
+    #[async_std::test]
+    async fn writes_header_value() {
+        let mut lines = vec![
+            "GET / HTTP/1.1".to_string(),
+            "".to_string(),
+        ];
+        write_header(&mut lines, "Host", "foo");
+        assert_eq!(lines, vec![
+            "GET / HTTP/1.1".to_string(),
+            "Host: foo".to_string(),
+            "".to_string(),
+        ]);
+        write_header(&mut lines, "Host", "bar");
+        assert_eq!(lines, vec![
+            "GET / HTTP/1.1".to_string(),
+            "Host: bar".to_string(),
+            "".to_string(),
+        ]);
     }
 
     #[async_std::test]
